@@ -28,8 +28,6 @@ VERSION = 0
 LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 
-
-
 class VllmWorker():
     def __init__(self):
         self.args = self.load_flags()
@@ -46,7 +44,7 @@ class VllmWorker():
         )
         self.running_jobs = list()
         self.awaiting_job = False
-        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))  
+        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
         self.run_engine()
         
 
@@ -86,7 +84,17 @@ class VllmWorker():
                 callback=self.add_new_job,
                 error_callback=self.job_request_error_callback
             )
+        if not self.running_jobs:
+            self.pool.apply_async(self.print_idle_string)
+        while not self.running_jobs:
+            pass
 
+
+    def print_idle_string(self):
+        dot_string = self.api_worker.dot_string_generator()
+        while not self.running_jobs:
+            print(f'\rWorker idling{next(dot_string)}', end='')
+            time.sleep(1)
 
     def add_new_job(self, job_batch_data):
         self.awaiting_job = False
@@ -103,7 +111,7 @@ class VllmWorker():
 
     def job_request_error_callback(self, response):
         self.awaiting_job = False
-        print(response)
+        print(response.json())
 
 
     def format_chat_context(
@@ -197,8 +205,23 @@ class VllmWorker():
                     job_batch_data.append(job_data)
 
             if progress_result_batch:
-                self.api_worker.send_batch_progress(num_generated_tokens_batch, progress_result_batch, job_batch_data=job_batch_data)
+                self.api_worker.send_batch_progress(
+                    num_generated_tokens_batch,
+                    progress_result_batch,
+                    self.progress_callback,
+                    self.progress_error_callback,
+                    job_batch_data
+                )
 
+
+    def progress_callback(self, response):
+        for job_reponse in response.json():
+            if job_reponse.get('canceled'):
+                print('CANCELED')
+                self.llm_engine.abort_request(job_reponse.get('job_id'))
+
+    def progress_error_callback(self, response):
+        print(response.json())
 
     def load_flags(self):
         parser = FlexibleArgumentParser()
