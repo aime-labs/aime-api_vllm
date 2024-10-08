@@ -5,7 +5,7 @@ from typing import List, Tuple
 import os
 import time
 import inspect
-from multiprocessing.dummy import Pool
+import sys
 
 from aime_api_worker_interface import APIWorkerInterface
 
@@ -22,31 +22,34 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import is_list_of
 
-WORKER_JOB_TYPE = "llama3"
+DEFAULT_WORKER_JOB_TYPE = "llama3"
 DEFAULT_WORKER_AUTH_KEY = "5b07e305b50505ca2b3284b4ae5f65d1"
 VERSION = 0
-LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
 
 class VllmWorker():
     def __init__(self):
         self.args = self.load_flags()
-        self.pool = Pool()
         self.api_worker = APIWorkerInterface(
             self.args.api_server, 
             self.args.job_type, 
             self.args.api_auth_key, 
             self.args.gpu_id, 
-            world_size=WORLD_SIZE, 
-            rank=LOCAL_RANK, 
             gpu_name=torch.cuda.get_device_name(), 
             worker_version=VERSION
         )
-        self.running_jobs = list()
-        self.awaiting_job = False
-        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
-        self.run_engine()
         
+        #keyboard.add_hotkey('q', self.exit_worker)
+
+        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
+
+        self.run_engine()
+
+
+
 
     def get_sampling_params(self, job_data):
         
@@ -57,6 +60,7 @@ class VllmWorker():
 
 
     def get_chat_context_prompt(self, job_data):
+        print(job_data)
         prompt_input = job_data.get('prompt_input')
         if prompt_input is None:
             prompt_input = job_data.get('text')
@@ -72,46 +76,10 @@ class VllmWorker():
                         "content": prompt_input
                     }
                 )
-        return self.format_chat_context(chat_context)
-
-
-    def update_worker_job_request(self, request_interval=2):
-        if not self.awaiting_job:
-            self.awaiting_job = True
-            self.pool.apply_async(
-                self.api_worker.job_batch_request,
-                args=[self.args.max_jobs_per_job_request],
-                callback=self.add_new_job,
-                error_callback=self.job_request_error_callback
-            )
-        if not self.running_jobs:
-            self.pool.apply_async(self.print_idle_string)
-        while not self.running_jobs:
-            pass
-
-
-    def print_idle_string(self):
-        dot_string = self.api_worker.dot_string_generator()
-        while not self.running_jobs:
-            print(f'\rWorker idling{next(dot_string)}', end='')
-            time.sleep(1)
-
-    def add_new_job(self, job_batch_data):
-        self.awaiting_job = False
-        self.running_jobs += job_batch_data
-                    
-        for batch_idx, job_data in enumerate(job_batch_data):
-            prompt = self.get_chat_context_prompt(job_data)
-            if prompt:
-                self.llm_engine.add_request(
-                    job_data.get('job_id'), 
-                    prompt,
-                    self.get_sampling_params(job_data)
-                )
-
-    def job_request_error_callback(self, response):
-        self.awaiting_job = False
-        print(response.json())
+            return self.format_chat_context(chat_context)
+        else:
+            return prompt_input
+        
 
 
     def format_chat_context(
@@ -123,9 +91,11 @@ class VllmWorker():
         ):
         tokenizer = self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
         model_config = self.llm_engine.get_model_config()
-
-        conversation, mm_data = parse_chat_messages(chat_context, model_config,
-                                                    tokenizer)
+        conversation, mm_data = parse_chat_messages(
+            chat_context,
+            model_config,
+            tokenizer
+        )
         if isinstance(tokenizer, MistralTokenizer):
             prompt = apply_mistral_chat_template(
                 tokenizer,
@@ -142,12 +112,10 @@ class VllmWorker():
                 add_generation_prompt=add_generation_prompt,
                 tools=tools,
             )
-
         if is_list_of(prompt, int):
             inputs = TokensPrompt(prompt_token_ids=prompt)
         else:
             inputs = TextPrompt(prompt=prompt)
-
         if mm_data is not None:
             inputs["multi_modal_data"] = mm_data
 
@@ -157,21 +125,14 @@ class VllmWorker():
     def validate_chat_context(self, job_id, chat_context):
         for item in chat_context:
             if not isinstance(item, dict) or not all(key in item for key in ("role", "content")):
-                job_data = self.get_job_data(job_id)
                 result = {
                     'error':  f'Dialog has invalid chat context format! Format should be [{{"role": "user/assistant/system", "content": "Message content"}}, ...] but is {chat_context}',
                     'model_name': self.args.job_type
                 }
-                self.api_worker.send_job_results(result, job_data=job_data)
-                self.running_jobs.remove(job_data)
+                self.api_worker.send_job_results(result, job_id=job_id)
                 return False
         return True
 
-
-    def get_job_data(self, job_id):
-        for job_data in self.running_jobs:
-            if job_data.get('job_id') == job_id:
-                return job_data
 
     def get_result(self, request_output):
         num_generated_tokens = len(request_output.outputs[0].token_ids)
@@ -183,62 +144,61 @@ class VllmWorker():
             'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens
         }
 
+    def add_job_requests(self, job_batch_data):
+        for job_data in job_batch_data:
+            prompt = self.get_chat_context_prompt(job_data)
+            if prompt:
+                self.llm_engine.add_request(
+                    job_data.get('job_id'), 
+                    prompt,
+                    self.get_sampling_params(job_data)
+                )
+
 
     def run_engine(self):
-        while True:
-            self.update_worker_job_request()
-
-            request_outputs = self.llm_engine.step()
-            progress_result_batch = list()
-            job_batch_data = list()
+        job_request_generator = self.api_worker.job_request_generator(self.args.max_batch_size)
+        for job_batch_data in job_request_generator:
+            self.add_job_requests(job_batch_data)
+            
             num_generated_tokens_batch = list()
-            for request_output in request_outputs:
+            progress_result_batch = list()
+            job_id_batch = list()
+            for request_output in self.llm_engine.step():
                 result = self.get_result(request_output)
-                job_data = self.get_job_data(request_output.request_id)
-
                 if request_output.finished:
-                    self.api_worker.send_job_results(result, job_data)
-                    self.running_jobs.remove(job_data)
+                    self.api_worker.send_job_results(
+                        result,
+                        job_id=request_output.request_id,
+                        wait_for_response=False,
+                        error_callback=self.error_callback
+                        )
                 else:
                     num_generated_tokens_batch.append(result.get('num_generated_tokens'))
                     progress_result_batch.append(result)
-                    job_batch_data.append(job_data)
+                    job_id_batch.append(request_output.request_id)
 
             if progress_result_batch:
                 self.api_worker.send_batch_progress(
                     num_generated_tokens_batch,
                     progress_result_batch,
-                    self.progress_callback,
-                    self.progress_error_callback,
-                    job_batch_data
+                    job_batch_ids=job_id_batch,
+                    progress_error_callback=self.error_callback
                 )
+            for job_id in self.api_worker.get_canceled_job_ids():
+                print(f'Job {job_id} canceled')
+                self.llm_engine.abort_request(job_id)
 
-
-    def progress_callback(self, response):
-        for job_reponse in response.json():
-            if job_reponse.get('canceled'):
-                print('CANCELED')
-                self.llm_engine.abort_request(job_reponse.get('job_id'))
-
-    def progress_error_callback(self, response):
+    def error_callback(self, response):
         print(response.json())
 
     def load_flags(self):
         parser = FlexibleArgumentParser()
         parser.add_argument(
-            "--max-seq-len", type=int, default=8192, required=False,
-            help="Maximum sequence length",
+            "--max-batch-size", type=int, default=256,
+            help="Maximum batch size"
         )
         parser.add_argument(
-            "--max-jobs-per-job-request", type=int, default=512, required=False,
-            help="Maximum batch size",
-        )
-        parser.add_argument(
-            "--max-jobs-per-job-results", type=int, default=8, required=False,
-            help="Maximum batch size",
-        )
-        parser.add_argument(
-            "--job-type", type=str, required=False,
+            "--job-type", type=str, default=DEFAULT_WORKER_JOB_TYPE,
             help="Worker job type for the API Server"
         )
         parser.add_argument(
@@ -246,11 +206,11 @@ class VllmWorker():
             help="Address of the API server"
         )
         parser.add_argument(
-            "--gpu-id", type=int, default=0, required=False,
+            "--gpu-id", type=int, default=0,
             help="ID of the GPU to be used"
         )
         parser.add_argument(
-            "--api-auth-key", type=str , default=DEFAULT_WORKER_AUTH_KEY, required=False, 
+            "--api-auth-key", type=str , default=DEFAULT_WORKER_AUTH_KEY,
             help="API server worker auth key",
         )
         parser = EngineArgs.add_cli_args(parser)
