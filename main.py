@@ -5,8 +5,8 @@ from typing import List, Tuple
 import os
 import time
 import inspect
-import sys
 
+import logging
 from aime_api_worker_interface import APIWorkerInterface
 
 import torch
@@ -21,13 +21,16 @@ from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import is_list_of
+from vllm.logger import init_logger
+from vllm.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
+
+
 
 DEFAULT_WORKER_JOB_TYPE = "llama3"
 DEFAULT_WORKER_AUTH_KEY = "5b07e305b50505ca2b3284b4ae5f65d1"
 VERSION = 0
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
 
 
 class VllmWorker():
@@ -39,17 +42,17 @@ class VllmWorker():
             self.args.api_auth_key, 
             self.args.gpu_id, 
             gpu_name=torch.cuda.get_device_name(), 
-            worker_version=VERSION
+            worker_version=VERSION,
+            exit_callback=self.exit_callback
         )
-        
-        #keyboard.add_hotkey('q', self.exit_worker)
-
+        self.logger = self.get_logger()
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
-
         self.run_engine()
 
-
-
+    def get_logger(self):
+        level = logging.DEBUG if self.args.dev else logging.INFO
+        logging.basicConfig(format="%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s", datefmt="%m-%d %H:%M:%S", level=level)
+        return init_logger(__name__)
 
     def get_sampling_params(self, job_data):
         
@@ -60,14 +63,13 @@ class VllmWorker():
 
 
     def get_chat_context_prompt(self, job_data):
-        print(job_data)
         prompt_input = job_data.get('prompt_input')
         if prompt_input is None:
             prompt_input = job_data.get('text')
         chat_context = job_data.get('chat_context')
         if chat_context:
             if not self.validate_chat_context(job_data.get('job_id'), chat_context):
-                print('Wrong context shape')
+                logger.warning('Wrong context shape')
                 return
             if prompt_input:
                 chat_context.append(
@@ -80,7 +82,6 @@ class VllmWorker():
         else:
             return prompt_input
         
-
 
     def format_chat_context(
         self,
@@ -144,6 +145,7 @@ class VllmWorker():
             'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens
         }
 
+
     def add_job_requests(self, job_batch_data):
         for job_data in job_batch_data:
             prompt = self.get_chat_context_prompt(job_data)
@@ -153,6 +155,8 @@ class VllmWorker():
                     prompt,
                     self.get_sampling_params(job_data)
                 )
+        if job_batch_data:
+            self.logger.info(f'Job(s) added: {", ".join(job_data.get("job_id") for job_data in job_batch_data)}.')
 
 
     def run_engine(self):
@@ -163,6 +167,7 @@ class VllmWorker():
             num_generated_tokens_batch = list()
             progress_result_batch = list()
             job_id_batch = list()
+
             for request_output in self.llm_engine.step():
                 result = self.get_result(request_output)
                 if request_output.finished:
@@ -185,11 +190,22 @@ class VllmWorker():
                     progress_error_callback=self.error_callback
                 )
             for job_id in self.api_worker.get_canceled_job_ids():
-                print(f'Job {job_id} canceled')
+                self.logger.info(f'Job {job_id} canceled')
                 self.llm_engine.abort_request(job_id)
 
+
+
     def error_callback(self, response):
-        print(response.json())
+        self.logger.error(response.json())
+
+
+    def exit_callback(self):
+
+
+        destroy_model_parallel()
+        destroy_distributed_environment()
+        del self.llm_engine
+        torch.cuda.empty_cache()
 
     def load_flags(self):
         parser = FlexibleArgumentParser()
@@ -213,8 +229,13 @@ class VllmWorker():
             "--api-auth-key", type=str , default=DEFAULT_WORKER_AUTH_KEY,
             help="API server worker auth key",
         )
+        parser.add_argument(
+            "--dev", action='store_true',
+            help="Sets logger level to DEBUG",
+        )
         parser = EngineArgs.add_cli_args(parser)
         return parser.parse_args()
+
 
 def main():
     vllm_worker = VllmWorker()
