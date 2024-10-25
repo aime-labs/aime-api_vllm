@@ -1,4 +1,4 @@
-# AIME API VLLM Worker
+# AIME API vLLM Worker
 
 Copyright (c) AIME GmbH and affiliates. Find more info at https://www.aime.info/api
 
