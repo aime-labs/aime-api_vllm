@@ -50,7 +50,6 @@ class VllmWorker():
         self.last_progress_update = time.time()
         self.logger = self.get_logger()
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
-
         self.run_engine()
 
 
@@ -141,13 +140,18 @@ class VllmWorker():
 
     def get_result(self, request_output):
         num_generated_tokens = len(request_output.outputs[0].token_ids)
-        return {
-            'text': request_output.outputs[0].text,
+        max_seq_length = self.llm_engine.get_model_config().max_model_len
+        result = {
             'model_name': self.model_name,
             'num_generated_tokens': num_generated_tokens,
-            'max_seq_len': self.args.max_model_len,
+            'max_seq_len': max_seq_length,
             'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens
         }
+        if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
+            result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_seq_length}"
+        else:
+            result['text'] = request_output.outputs[0].text
+        return result
 
     def update_progress(self):
         now = time.time()
@@ -207,6 +211,7 @@ class VllmWorker():
 
     def error_callback(self, response):
         self.logger.error(response)
+        raise response
 
 
     def exit_callback(self):
