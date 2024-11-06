@@ -196,7 +196,7 @@ class VllmWorker():
                         wait_for_response=False,
                         error_callback=self.error_callback
                     )
-                    del self.progress_update_data[request_output.request_id]
+                    self.progress_update_data.pop(request_output.request_id, None)
                 else:
                     self.progress_update_data[request_output.request_id] = result
             self.update_progress()
