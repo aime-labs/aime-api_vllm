@@ -6,7 +6,8 @@ import os
 import time
 import inspect
 from pathlib import Path
-
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
+                    Union, cast, overload)
 import logging
 from aime_api_worker_interface import APIWorkerInterface
 
@@ -23,7 +24,7 @@ from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import is_list_of
 from vllm.logger import init_logger
 from vllm.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
-
+from transformers import AutoTokenizer
 
 
 DEFAULT_WORKER_JOB_TYPE = "llama3"
@@ -36,6 +37,8 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 class VllmWorker():
     def __init__(self):
         self.args = self.load_flags()
+        self.model_name = self.args.model_label or Path(self.args.model).name
+        self.tokenizer_workaround = self.get_tokenizer_workaround()
         self.api_worker = APIWorkerInterface(
             self.args.api_server, 
             self.args.job_type, 
@@ -45,12 +48,20 @@ class VllmWorker():
             worker_version=VERSION,
             exit_callback=self.exit_callback
         )
-        self.model_name = self.args.model_label or Path(self.args.model).name
         self.progress_update_data = dict()
         self.last_progress_update = time.time()
         self.logger = self.get_logger()
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
         self.run_engine()
+
+
+    def get_tokenizer_workaround(self):
+        if self.model_name == 'Mixtral-8x7B-Instruct-v0.1-FP8-hf':
+            try:
+                tokenizer_workaround_path = Path(self.args.model) / 'tokenizer_workaround'
+                return AutoTokenizer.from_pretrained(tokenizer_workaround_path)
+            except OSError:
+                exit(f'Error: To use the model {self.model_name} your model weight folder needs a subfolder called "tokenizer_workaround" containing the files "config.json", "tokenizer_config.json" "tokenizer.json"  and "tokenizer.model" of the Original Mistral Repo.')
 
 
     def get_logger(self):
@@ -93,20 +104,30 @@ class VllmWorker():
         add_generation_prompt = True,
         tools = None
         ):
-        tokenizer = self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
+
+        tokenizer = self.llm_engine.get_tokenizer()
+        #chat_context = cast(List[ChatCompletionMessageParam], chat_context)
         model_config = self.llm_engine.get_model_config()
         conversation, mm_data = parse_chat_messages(
             chat_context,
             model_config,
             tokenizer
         )
-        if isinstance(tokenizer, MistralTokenizer):
+        if self.tokenizer_workaround:
+            prompt = self.tokenizer_workaround.apply_chat_template(
+                chat_context,
+                tokenize=False,
+                chat_template=chat_template,
+                add_generation_prompt=add_generation_prompt,
+                tools=tools
+            )
+        elif isinstance(tokenizer, MistralTokenizer):
             prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=chat_context,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
-                tools=tools,
+                tools=tools
             )
         else:
             prompt = apply_hf_chat_template(
