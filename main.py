@@ -29,7 +29,7 @@ from transformers import AutoTokenizer
 
 DEFAULT_WORKER_JOB_TYPE = "llama3"
 DEFAULT_WORKER_AUTH_KEY = "5b07e305b50505ca2b3284b4ae5f65d1"
-VERSION = 1
+VERSION = 2
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -162,11 +162,17 @@ class VllmWorker():
     def get_result(self, request_output):
         num_generated_tokens = len(request_output.outputs[0].token_ids)
         max_seq_length = self.llm_engine.get_model_config().max_model_len
+        
         result = {
             'model_name': self.model_name,
             'num_generated_tokens': num_generated_tokens,
             'max_seq_len': max_seq_length,
-            'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens
+            'prompt_length': len(request_output.prompt_token_ids),
+            'arrival_time': request_output.metrics.arrival_time,
+            'finished_time': time.time(),
+            'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens,
+            'pending_duration': request_output.metrics.time_in_queue,
+            'preprocessing_duration': request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
         }
         if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
             result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_seq_length}"
