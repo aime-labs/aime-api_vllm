@@ -1,4 +1,4 @@
-aime-api-worker-interface==0.9.4
+aime-api-worker-interface @ git+https://github.com//aime-team/aime-api-worker-interface
 aiohappyeyeballs==2.4.4
 aiohttp==3.11.10
 aiohttp-cors==0.7.0
