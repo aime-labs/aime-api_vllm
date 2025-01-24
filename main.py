@@ -44,7 +44,7 @@ class VllmWorker():
             self.args.job_type, 
             self.args.api_auth_key, 
             self.args.gpu_id, 
-            gpu_name=torch.cuda.get_device_name(), 
+            gpu_name=self.get_gpu_names(), 
             worker_version=VERSION,
             exit_callback=self.exit_callback
         )
@@ -53,6 +53,9 @@ class VllmWorker():
         self.logger = self.get_logger()
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
         self.run_engine()
+
+    def get_gpu_names(self):
+        return '+'.join([torch.cuda.get_device_name(idx) for idx in range(self.args.tensor_parallel_size)])
 
 
     def get_tokenizer_workaround(self):
@@ -111,7 +114,8 @@ class VllmWorker():
         conversation, mm_data = parse_chat_messages(
             chat_context,
             model_config,
-            tokenizer
+            tokenizer,
+            content_format=None # Fix for vllm update to 0.6.6.post1, only needed for OpenAI
         )
         if self.tokenizer_workaround:
             prompt = self.tokenizer_workaround.apply_chat_template(
@@ -160,25 +164,26 @@ class VllmWorker():
 
 
     def get_result(self, request_output):
-        num_generated_tokens = len(request_output.outputs[0].token_ids)
-        max_seq_length = self.llm_engine.get_model_config().max_model_len
-        
-        result = {
-            'model_name': self.model_name,
-            'num_generated_tokens': num_generated_tokens,
-            'max_seq_len': max_seq_length,
-            'prompt_length': len(request_output.prompt_token_ids),
-            'arrival_time': request_output.metrics.arrival_time,
-            'finished_time': time.time(),
-            'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens,
-            'pending_duration': request_output.metrics.time_in_queue,
-            'preprocessing_duration': request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
-        }
-        if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
-            result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_seq_length}"
-        else:
-            result['text'] = request_output.outputs[0].text
-        return result
+        if request_output:
+            num_generated_tokens = len(request_output.outputs[0].token_ids)
+            max_seq_length = self.llm_engine.get_model_config().max_model_len
+            result = {
+                'model_name': self.model_name,
+                'num_generated_tokens': num_generated_tokens,
+                'max_seq_len': max_seq_length,
+                'prompt_length': len(request_output.prompt_token_ids),
+                'arrival_time': request_output.metrics.arrival_time,
+                'finished_time': time.time(),
+                'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens,
+                'pending_duration': request_output.metrics.time_in_queue
+            }
+            if request_output.metrics.first_token_time and request_output.metrics.first_scheduled_time:
+                result['preprocessing_duration'] = request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
+            if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
+                result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_seq_length}"
+            else:
+                result['text'] = request_output.outputs[0].text
+            return result
 
     def update_progress(self):
         now = time.time()
