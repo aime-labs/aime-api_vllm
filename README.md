@@ -10,6 +10,7 @@ For a full list of current supported models see [here](https://docs.vllm.ai/en/l
 
 
 ## How to setup a AIME API vLLM worker with MLC
+<<<<<<< HEAD
 
 ```bash
 mlc-create vllm Pytorch 2.4.0 -d /path/to/your/model/weights
@@ -17,11 +18,24 @@ mlc-open vllm
 cd /desired/location/of/this/repo
 git clone https://github.com/aime-labs/aime-api_vllm
 pip3 install -r /desired/location/of/this/repo/aime-api_vllm/requirements_pinned.txt
+=======
+```
+mlc-create vllm Pytorch 2.4.0 
+mlc-open vllm
+
+git clone https://github.com/aime-labs/vllm_worker.git
+
+cd vllm_worker
+
+pip3 install -r requirements.txt
+>>>>>>> b3dc126b7115087cb18517274105b96a73698869
 ```
 
 ### Download LLM models
 
-python download_weights.py -m {model name} -o {directory to store model}
+```bash
+python download_weights.py -m {model name} -o /path/to/your/model/weights/
+```
 
 e.g. to download LLama3.3 70B Instruct model:
 
