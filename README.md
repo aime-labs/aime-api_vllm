@@ -13,7 +13,7 @@ For a full list of current supported models see [here](https://docs.vllm.ai/en/l
 
 
 ```bash
-mlc-create vllm Pytorch 2.4.0 
+mlc-create vllm Pytorch 2.5.1 
 mlc-open vllm
 
 git clone https://github.com/aime-labs/vllm_worker.git
