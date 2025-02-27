@@ -18,7 +18,7 @@ mlc open vllm
 
 git clone https://github.com/aime-labs/aime-api_vllm.git
 
-cd vllm_worker
+cd aime-api_vllm
 
 pip3 install -r requirements.txt
 ```
