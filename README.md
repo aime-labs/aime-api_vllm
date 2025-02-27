@@ -25,7 +25,7 @@ pip3 install -r requirements.txt
 
 ### Download LLM models
 
-The installed AIME worker interface Pip provides the 'awi' command to download model weights:
+The installed AIME worker interface pip provides the 'awi' command to download model weights:
 
 ```bash
 awi download-weights {model name} -o /path/to/your/model/weights/
