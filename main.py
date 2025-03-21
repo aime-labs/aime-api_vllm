@@ -44,7 +44,7 @@ class VllmWorker():
             self.args.job_type, 
             self.args.api_auth_key, 
             self.args.gpu_id, 
-            gpu_name=self.get_gpu_names(), 
+            gpu_name=self.get_gpu_name(), 
             worker_version=VERSION,
             exit_callback=self.exit_callback
         )
@@ -54,9 +54,8 @@ class VllmWorker():
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
         self.run_engine()
 
-    def get_gpu_names(self):
-        return '+'.join([torch.cuda.get_device_name(idx) for idx in range(self.args.tensor_parallel_size)])
-
+    def get_gpu_name(self):
+        return f'{self.args.tensor_parallel_size}x{torch.cuda.get_device_name(0)}'
 
     def get_tokenizer_workaround(self):
         if self.model_name == 'Mixtral-8x7B-Instruct-v0.1-FP8-hf':
