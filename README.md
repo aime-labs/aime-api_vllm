@@ -1,10 +1,10 @@
 # AIME API vLLM Worker
 
- [vLLM](https://docs.vllm.ai) Worker for [AIME API Server](https://github.com/aime-team/aime-api-server) to scalable serve large language models on CUDA or ROCM with various quantizations.
+ [vLLM](https://docs.vllm.ai) worker for [AIME API Server](https://github.com/aime-team/aime-api-server) to scalable serve large language models on CUDA or ROCM with various quantizations and large context lengths.
 
 Supported models:
 
-- Llama / Mistral /  Mixtral / Bloom / Falcon / Gemma / GPT-NeoX / InternLM / Mamba / Nemotron / Phi / Qwen / Starcoder
+- Llama / Qwen / Mistral /  Mixtral / DeepSeek / Bloom / Falcon / Gemma / GPT-NeoX / InternLM / Mamba / Nemotron / Phi / Starcoder
 
 For a full list of current supported models see [here](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
@@ -13,26 +13,28 @@ For a full list of current supported models see [here](https://docs.vllm.ai/en/l
 
 
 ```bash
-mlc-create vllm Pytorch 2.4.0 
-mlc-open vllm
+mlc create vllm Pytorch 2.5.1 
+mlc open vllm
 
-git clone https://github.com/aime-labs/vllm_worker.git
+git clone https://github.com/aime-labs/aime-api_vllm.git
 
-cd vllm_worker
+cd aime-api_vllm
 
 pip3 install -r requirements.txt
 ```
 
 ### Download LLM models
 
+The installed AIME worker interface pip provides the 'awi' command to download model weights:
+
 ```bash
-python download_weights.py -m {model name} -o /path/to/your/model/weights/
+awi download-weights {model name} -o /path/to/your/model/weights/
 ```
 
-e.g. to download LLama3.3 70B Instruct model:
+e.g. to download LLama3.1 70B fp8 Instruct model:
 
 ```bash
-python download_weights.py -m meta-llama/Llama-3.3-70B-Instruct -o /path/to/your/model/weights/
+awi download-weights neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8 -o /path/to/your/model/weights/
 ```
 
 ## How to start a AIME API vLLM worker
