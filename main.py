@@ -1,17 +1,18 @@
 
 
 import argparse
-from typing import List, Tuple
+from typing import List, Tuple, cast
 import os
 import time
 import inspect
 from pathlib import Path
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
-                    Union, cast, overload)
+import re
 import logging
-from aime_api_worker_interface import APIWorkerInterface
 
 import torch
+
+from aime_api_worker_interface import APIWorkerInterface
+
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -29,15 +30,41 @@ from transformers import AutoTokenizer
 
 DEFAULT_WORKER_JOB_TYPE = "llama3"
 DEFAULT_WORKER_AUTH_KEY = "5b07e305b50505ca2b3284b4ae5f65d1"
-VERSION = 2
+VERSION = 3
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
+LLM_FAMILIES = [
+    'Llama',
+    'Mixtral',
+    'Qwen',
+    'DeepSeek'
+]
+
+QUANTIZATIONS = [
+    'int1',
+    'int4',
+    'int8',
+    'int16',
+    'int32',
+    'int64',
+    'fp4',
+    'fp8',
+    'fp16',
+    'fp32',
+    'bfloat16',
+    'uint4',
+    'uint8',
+    'uint16',
+    'uint32',
+    'uint64'
+]
 
 
 class VllmWorker():
     def __init__(self):
         self.args = self.load_flags()
-        self.model_name = self.args.model_label or Path(self.args.model).name
         self.tokenizer_workaround = self.get_tokenizer_workaround()
         self.api_worker = APIWorkerInterface(
             self.args.api_server, 
@@ -46,7 +73,13 @@ class VllmWorker():
             self.args.gpu_id, 
             gpu_name=self.get_gpu_name(), 
             worker_version=VERSION,
-            exit_callback=self.exit_callback
+            exit_callback=self.exit_callback,
+            model_label=self.args.model_label,
+            model_quantization=self.args.model_quantization, 
+            model_size=self.args.model_size, 
+            model_family=self.args.model_family, 
+            model_type=self.args.model_type,
+            model_repo_name=Path(self.args.model).name
         )
         self.progress_update_data = dict()
         self.last_progress_update = time.time()
@@ -58,12 +91,13 @@ class VllmWorker():
         return f'{self.args.tensor_parallel_size}x{torch.cuda.get_device_name(0)}'
 
     def get_tokenizer_workaround(self):
-        if self.model_name == 'Mixtral-8x7B-Instruct-v0.1-FP8-hf':
+        model_name = Path(self.args.model).name
+        if model_name == 'Mixtral-8x7B-Instruct-v0.1-FP8-hf':
             try:
                 tokenizer_workaround_path = Path(self.args.model) / 'tokenizer_workaround'
                 return AutoTokenizer.from_pretrained(tokenizer_workaround_path)
             except OSError:
-                exit(f'Error: To use the model {self.model_name} your model weight folder needs a subfolder called "tokenizer_workaround" containing the files "config.json", "tokenizer_config.json" "tokenizer.json"  and "tokenizer.model" of the Original Mistral Repo.')
+                exit(f'Error: To use the model {model_name} your model weight folder needs a subfolder called "tokenizer_workaround" containing the files "config.json", "tokenizer_config.json" "tokenizer.json"  and "tokenizer.model" of the Original Mistral Repo.')
 
 
     def get_logger(self):
@@ -155,7 +189,6 @@ class VllmWorker():
             if not isinstance(item, dict) or not all(key in item for key in ("role", "content")):
                 result = {
                     'error':  f'Dialog has invalid chat context format! Format should be [{{"role": "user/assistant/system", "content": "Message content"}}, ...] but is {chat_context}',
-                    'model_name': self.model_name
                 }
                 self.api_worker.send_job_results(result, job_id=job_id)
                 return False
@@ -167,7 +200,6 @@ class VllmWorker():
             num_generated_tokens = len(request_output.outputs[0].token_ids)
             max_seq_length = self.llm_engine.get_model_config().max_model_len
             result = {
-                'model_name': self.model_name,
                 'num_generated_tokens': num_generated_tokens,
                 'max_seq_len': max_seq_length,
                 'prompt_length': len(request_output.prompt_token_ids),
@@ -267,6 +299,22 @@ class VllmWorker():
             help="Model label to display in client. Default: Name of the directory given in --model"
         )
         parser.add_argument(
+            "--model-size", type=str,
+            help="Model size (number of parameters). E.g. '8B', '70B'"
+        )
+        parser.add_argument(
+            "--model-family", type=str,
+            help="Model family. E.g. 'Llama', 'Mixtral'"
+        )
+        parser.add_argument(
+            "--model-quantization", choices=QUANTIZATIONS, default='fp16',
+            help="Model quantization"
+        )
+        parser.add_argument(
+            "--model-type", type=str, default="LLM",
+            help="Model type e.g. 'LLM'."
+        )
+        parser.add_argument(
             "--api-server", type=str, required=True,
             help="Address of the API server"
         )
@@ -291,8 +339,27 @@ class VllmWorker():
         args = parser.parse_args()
         if not args.enable_chunked_prefill:
             args.enable_chunked_prefill = False # In vllm by default True for max_model_len > 32K --> Worker crash with requests containing longer contexts
+        args.model_label = args.model_label or Path(args.model).name
+        args.model_size = args.model_size or self.extract_model_size(args)
+        args.model_quantization = args.model_quantization or self.extract_quantization(args)
+        args.model_family = args.model_family or self.extract_family(args)
         return args
 
+
+    def extract_model_size(self, args):
+        match = re.search(r'(\d+B)', Path(args.model).name.upper())  # Matches arbitrary number of digits followed by 'B'
+        return match.group(1) if match else None
+        
+
+    def extract_quantization(self, args):
+        for quantization in QUANTIZATIONS:
+            if quantization in Path(args.model).name.lower():
+                return quantization
+
+    def extract_family(self, args):
+        for family in LLM_FAMILIES:
+            if family.lower() in Path(args.model).name.lower():
+                return family
 
 def main():
     vllm_worker = VllmWorker()
