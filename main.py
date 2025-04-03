@@ -206,7 +206,11 @@ class VllmWorker():
                 'arrival_time': request_output.metrics.arrival_time,
                 'finished_time': time.time(),
                 'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens,
-                'pending_duration': request_output.metrics.time_in_queue
+                'pending_duration': request_output.metrics.time_in_queue,
+                'metrics': {
+                    'in_num_tokens': len(request_output.prompt_token_ids),
+                    'out_num_tokens': num_generated_tokens, 
+                }
             }
             if request_output.metrics.first_token_time and request_output.metrics.first_scheduled_time:
                 result['preprocessing_duration'] = request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
