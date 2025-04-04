@@ -119,7 +119,7 @@ class VllmWorker():
         chat_context = job_data.get('chat_context')
         if chat_context:
             if not self.validate_chat_context(job_data.get('job_id'), chat_context):
-                logger.warning('Wrong context shape')
+                self.logger.warning('Wrong context shape')
                 return
             if prompt_input:
                 chat_context.append(
