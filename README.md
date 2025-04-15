@@ -4,7 +4,7 @@
 
 Supported models:
 
-- Llama / Qwen / Mistral /  Mixtral / DeepSeek / Bloom / Falcon / Gemma / GPT-NeoX / InternLM / Mamba / Nemotron / Phi / Starcoder
+- Llama / Deepseek / Qwen / Mistral /  Mixtral / DeepSeek / Bloom / Falcon / Gemma / GPT-NeoX / InternLM / Mamba / Nemotron / Phi / Starcoder
 
 For a full list of current supported models see [here](https://docs.vllm.ai/en/latest/models/supported_models.html)
 
@@ -13,7 +13,7 @@ For a full list of current supported models see [here](https://docs.vllm.ai/en/l
 
 
 ```bash
-mlc create vllm Pytorch 2.5.1 
+mlc create vllm Pytorch 2.6.0 
 mlc open vllm
 
 git clone https://github.com/aime-labs/aime-api_vllm.git
