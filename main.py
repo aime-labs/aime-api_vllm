@@ -311,7 +311,7 @@ class VllmWorker():
             help="Model family. E.g. 'Llama', 'Mixtral'"
         )
         parser.add_argument(
-            "--model-quantization", choices=QUANTIZATIONS, default='fp16',
+            "--model-quantization", choices=QUANTIZATIONS,
             help="Model quantization"
         )
         parser.add_argument(
@@ -345,7 +345,7 @@ class VllmWorker():
             args.enable_chunked_prefill = False # In vllm by default True for max_model_len > 32K --> Worker crash with requests containing longer contexts
         args.model_label = args.model_label or Path(args.model).name
         args.model_size = args.model_size or self.extract_model_size(args)
-        args.model_quantization = args.model_quantization or self.extract_quantization(args)
+        args.model_quantization = args.model_quantization or self.extract_quantization(args) or 'fp16'
         args.model_family = args.model_family or self.extract_family(args)
         return args
 
