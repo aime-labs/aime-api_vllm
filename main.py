@@ -141,6 +141,9 @@ class VllmWorker():
         tools = None
         ):
 
+        if not chat_template:
+            chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
+
         tokenizer = self.llm_engine.get_tokenizer()
         #chat_context = cast(List[ChatCompletionMessageParam], chat_context)
         model_config = self.llm_engine.get_model_config()
@@ -158,21 +161,14 @@ class VllmWorker():
                 add_generation_prompt=add_generation_prompt,
                 tools=tools
             )
-        elif isinstance(tokenizer, MistralTokenizer):
-            prompt = apply_mistral_chat_template(
-                tokenizer,
-                messages=chat_context,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                tools=tools
-            )
         else:
-            prompt = apply_hf_chat_template(
-                tokenizer,
+            prompt = tokenizer.apply_chat_template(
                 conversation=conversation,
-                chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
                 tools=tools,
+                chat_template=chat_template,
+                tokenize=False,
+                return_tensors="pt"
             )
         if is_list_of(prompt, int):
             inputs = TokensPrompt(prompt_token_ids=prompt)
