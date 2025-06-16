@@ -114,7 +114,7 @@ class VllmWorker():
         return SamplingParams(**sampling_params)
 
 
-    def get_chat_context_prompt(self, job_data):
+    def get_prompt_input_ids(self, job_data):
         prompt_input = job_data.get('prompt_input') or job_data.get('text')
         chat_context = job_data.get('chat_context')
         if chat_context:
@@ -130,7 +130,7 @@ class VllmWorker():
                 )
             return self.format_chat_context(chat_context)
         else:
-            return prompt_input
+            return self.llm_engine.get_tokenizer().encode(prompt_input)
         
 
     def format_chat_context(
@@ -145,7 +145,6 @@ class VllmWorker():
             chat_template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'system' %}\n{{ '<|system|>\n' + message['content'] + eos_token }}\n{% elif message['role'] == 'assistant' %}\n{{ '<|assistant|>\n'  + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}"
 
         tokenizer = self.llm_engine.get_tokenizer()
-        #chat_context = cast(List[ChatCompletionMessageParam], chat_context)
         model_config = self.llm_engine.get_model_config()
         conversation, mm_data = parse_chat_messages(
             chat_context,
@@ -154,30 +153,22 @@ class VllmWorker():
             content_format=None # Fix for vllm update to 0.6.6.post1, only needed for OpenAI
         )
         if self.tokenizer_workaround:
-            prompt = self.tokenizer_workaround.apply_chat_template(
+            input_ids = self.tokenizer_workaround.apply_chat_template(
                 chat_context,
-                tokenize=False,
+                tokenize=True,
                 chat_template=chat_template,
                 add_generation_prompt=add_generation_prompt,
                 tools=tools
             )
         else:
-            prompt = tokenizer.apply_chat_template(
+            input_ids = tokenizer.apply_chat_template(
                 conversation=conversation,
                 add_generation_prompt=add_generation_prompt,
                 tools=tools,
                 chat_template=chat_template,
-                tokenize=False,
-                return_tensors="pt"
+                tokenize=True
             )
-        if is_list_of(prompt, int):
-            inputs = TokensPrompt(prompt_token_ids=prompt)
-        else:
-            inputs = TextPrompt(prompt=prompt)
-        if mm_data is not None:
-            inputs["multi_modal_data"] = mm_data
-
-        return inputs
+        return input_ids
 
 
     def validate_chat_context(self, job_id, chat_context):
@@ -193,25 +184,26 @@ class VllmWorker():
 
     def get_result(self, request_output):
         if request_output:
+            input_length = len(request_output.prompt_token_ids)
             num_generated_tokens = len(request_output.outputs[0].token_ids)
-            max_seq_length = self.llm_engine.get_model_config().max_model_len
+            max_model_len = self.llm_engine.get_model_config().max_model_len
             result = {
                 'num_generated_tokens': num_generated_tokens,
-                'max_seq_len': max_seq_length,
-                'prompt_length': len(request_output.prompt_token_ids),
+                'max_seq_len': max_model_len,
+                'prompt_length': input_length,
                 'arrival_time': request_output.metrics.arrival_time,
                 'finished_time': time.time(),
-                'current_context_length': len(request_output.prompt_token_ids) + num_generated_tokens,
+                'current_context_length': input_length + num_generated_tokens,
                 'pending_duration': request_output.metrics.time_in_queue,
                 'metrics': {
-                    'in_num_tokens': len(request_output.prompt_token_ids),
+                    'in_num_tokens': input_length,
                     'out_num_tokens': num_generated_tokens, 
                 }
             }
             if request_output.metrics.first_token_time and request_output.metrics.first_scheduled_time:
                 result['preprocessing_duration'] = request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
             if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
-                result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_seq_length}"
+                result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_model_len}"
             else:
                 result['text'] = request_output.outputs[0].text
             return result
@@ -237,16 +229,46 @@ class VllmWorker():
 
 
     def add_job_requests(self, job_batch_data):
+        jobs_added = list()
+        jobs_rejected = list()
         for job_data in job_batch_data:
-            prompt = self.get_chat_context_prompt(job_data)
-            if prompt is not None:
-                self.llm_engine.add_request(
-                    job_data.get('job_id'), 
-                    prompt,
-                    self.get_sampling_params(job_data)
-                )
-        if job_batch_data:
-            self.logger.info(f'Job(s) added: {", ".join(job_data.get("job_id") for job_data in job_batch_data)}.')
+            prompt_input_ids = self.get_prompt_input_ids(job_data)
+                            
+            if prompt_input_ids is not None:
+                input_length = len(prompt_input_ids)
+                max_model_len = self.llm_engine.get_model_config().max_model_len
+                if input_length <= max_model_len:
+                    self.llm_engine.add_request(
+                        job_data.get('job_id'), 
+                        TokensPrompt(prompt_token_ids=prompt_input_ids),
+                        self.get_sampling_params(job_data)
+                    )
+                    jobs_added.append(job_data.get('job_id'))
+                else:
+                    result = {
+                        'error': f'The context length {input_length} is exceeding the maximum context length {max_model_len}',
+                        'num_generated_tokens': 0,
+                        'max_seq_len': max_model_len,
+                        'prompt_length': input_length,
+                        'arrival_time': time.time(),
+                        'finished_time': time.time(),
+                        'metrics': {
+                            'in_num_tokens': input_length,
+                            'out_num_tokens': 0
+                        },
+                        
+                    }
+                    jobs_rejected.append(job_data.get('job_id'))
+                    self.api_worker.send_job_results(
+                        result,   
+                        job_id=job_data.get('job_id'),
+                        wait_for_response=False,
+                        error_callback=self.error_callback
+                    )                
+        if jobs_added:
+            self.logger.info(f'Job(s) added: {", ".join(jobs_added)}')
+        if jobs_rejected:
+            self.logger.info(f'Job(s) rejected: {", ".join(jobs_rejected)}')
 
 
     def run_engine(self):
