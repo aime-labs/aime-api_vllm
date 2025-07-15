@@ -13,6 +13,7 @@ import torch
 
 from aime_api_worker_interface import APIWorkerInterface
 
+import vllm
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
@@ -71,7 +72,8 @@ class VllmWorker():
             self.args.job_type, 
             self.args.api_auth_key, 
             self.args.gpu_id, 
-            gpu_name=self.get_gpu_name(), 
+            gpu_name=torch.cuda.get_device_name(0), 
+            num_gpus=self.args.tensor_parallel_size,
             worker_version=VERSION,
             exit_callback=self.exit_callback,
             model_label=self.args.model_label,
@@ -79,7 +81,10 @@ class VllmWorker():
             model_size=self.args.model_size, 
             model_family=self.args.model_family, 
             model_type=self.args.model_type,
-            model_repo_name=Path(self.args.model).name
+            model_repo_name=Path(self.args.model).name,
+            framework='VLLM',
+            framework_version=vllm.version.__version__,
+            pytorch_version=torch.version.__version__
         )
         self.progress_update_data = dict()
         self.last_progress_update = time.time()
@@ -87,8 +92,6 @@ class VllmWorker():
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
         self.run_engine()
 
-    def get_gpu_name(self):
-        return f'{self.args.tensor_parallel_size}x{torch.cuda.get_device_name(0)}'
 
     def get_tokenizer_workaround(self):
         model_name = Path(self.args.model).name
