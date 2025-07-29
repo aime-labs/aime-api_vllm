@@ -82,9 +82,15 @@ class VllmWorker():
             model_family=self.args.model_family, 
             model_type=self.args.model_type,
             model_repo_name=Path(self.args.model).name,
+            model_path=self.args.model,
             framework='VLLM',
             framework_version=vllm.version.__version__,
-            pytorch_version=torch.version.__version__
+            pytorch_version=torch.version.__version__,
+            auto_tokenize_inputs=True,
+            trust_remote_code=self.args.trust_remote_code,
+            use_fast_tokenizer=self.args.use_fast_tokenizer,
+            max_batch_size=self.args.max_batch_size,
+            max_context_length=self.args.max_model_len
         )
         self.progress_update_data = dict()
         self.last_progress_update = time.time()
@@ -232,47 +238,12 @@ class VllmWorker():
 
 
     def add_job_requests(self, job_batch_data):
-        jobs_added = list()
-        jobs_rejected = list()
         for job_data in job_batch_data:
-            prompt_input_ids = self.get_prompt_input_ids(job_data)
-                            
-            if prompt_input_ids is not None:
-                input_length = len(prompt_input_ids)
-                max_model_len = self.llm_engine.get_model_config().max_model_len
-                if input_length <= max_model_len:
-                    self.llm_engine.add_request(
-                        job_data.get('job_id'), 
-                        TokensPrompt(prompt_token_ids=prompt_input_ids),
-                        self.get_sampling_params(job_data)
-                    )
-                    jobs_added.append(job_data.get('job_id'))
-                else:
-                    result = {
-                        'error': f'The context length {input_length} is exceeding the maximum context length {max_model_len}',
-                        'num_generated_tokens': 0,
-                        'max_seq_len': max_model_len,
-                        'prompt_length': input_length,
-                        'arrival_time': time.time(),
-                        'finished_time': time.time(),
-                        'metrics': {
-                            'in_num_tokens': input_length,
-                            'out_num_tokens': 0
-                        },
-                        
-                    }
-                    jobs_rejected.append(job_data.get('job_id'))
-                    self.api_worker.send_job_results(
-                        result,   
-                        job_id=job_data.get('job_id'),
-                        wait_for_response=False,
-                        error_callback=self.error_callback
-                    )                
-        if jobs_added:
-            self.logger.info(f'Job(s) added: {", ".join(jobs_added)}')
-        if jobs_rejected:
-            self.logger.info(f'Job(s) rejected: {", ".join(jobs_rejected)}')
-
+            self.llm_engine.add_request(
+                job_data.get('job_id'), 
+                TokensPrompt(prompt_token_ids=job_data.get('chat_context') or job_data.get('prompt_input')),
+                self.get_sampling_params(job_data)
+            )
 
     def run_engine(self):
         job_request_generator = self.api_worker.job_request_generator(self.args.max_batch_size)
@@ -359,6 +330,14 @@ class VllmWorker():
             "--dev", action='store_true',
             help="Sets logger level to DEBUG",
         )
+        parser.add_argument(
+            "--use-fast-tokenizer", action='store_true',
+            help="Use fast tokenizer in API Worker Interface",
+        )
+        parser.add_argument(
+            "--context-length", type=int,
+            help="ID of the GPU to be used"
+        )
 
         parser = EngineArgs.add_cli_args(parser)
         args = parser.parse_args()
@@ -368,6 +347,8 @@ class VllmWorker():
         args.model_size = args.model_size or self.extract_model_size(args)
         args.model_quantization = args.model_quantization or self.extract_quantization(args) or 'fp16'
         args.model_family = args.model_family or self.extract_family(args)
+        if args.context_length:
+            args.max_model_len = args.context_length
         return args
 
 
