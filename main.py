@@ -96,8 +96,11 @@ class VllmWorker():
         self.last_progress_update = time.time()
         self.logger = self.get_logger()
         self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
-        self.run_engine()
-
+        try:
+            self.run_engine()
+        except KeyboardInterrupt:
+            self.logger.info('KeyboardInterrupt triggered. Initiating shutdown sequence...')
+            self.api_worker.gracefully_exit()
 
     def get_tokenizer_workaround(self):
         model_name = Path(self.args.model).name
