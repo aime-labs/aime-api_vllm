@@ -1,2 +1,2 @@
-vllm==0.9.0
-aime_api_worker_interface @ git+https://github.com//aime-team/aime-api-worker-interface
+vllm==0.11.0
+aime_api_worker_interface @ git+https://github.com//aime-labs/aime-api-worker-interface

@@ -21,13 +21,12 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages)
 from vllm.inputs import TextPrompt, TokensPrompt
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import is_list_of
 from vllm.logger import init_logger
 from vllm.distributed.parallel_state import destroy_model_parallel, destroy_distributed_environment
+from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from transformers import AutoTokenizer
-
+from torch.distributed import get_rank
 
 DEFAULT_WORKER_JOB_TYPE = "llama3"
 DEFAULT_WORKER_AUTH_KEY = "5b07e305b50505ca2b3284b4ae5f65d1"
@@ -62,7 +61,6 @@ QUANTIZATIONS = [
     'uint64'
 ]
 
-
 class VllmWorker():
     def __init__(self):
         self.args = self.load_flags()
@@ -72,7 +70,8 @@ class VllmWorker():
             self.args.job_type, 
             self.args.api_auth_key, 
             self.args.gpu_id, 
-            gpu_name=torch.cuda.get_device_name(0), 
+            gpu_name=torch.cuda.get_device_name(0),
+            queue_name=self.args.queue_name,
             num_gpus=self.args.tensor_parallel_size,
             worker_version=VERSION,
             exit_callback=self.exit_callback,
@@ -93,9 +92,10 @@ class VllmWorker():
             max_context_length=self.args.max_model_len
         )
         self.progress_update_data = dict()
+        self.response_tokens_first_part = dict()
         self.last_progress_update = time.time()
         self.logger = self.get_logger()
-        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args))
+        self.llm_engine = LLMEngine.from_engine_args(EngineArgs.from_cli_args(self.args)) #  stat_loggers=self.logger : Workaround for missing metrics but currently throws NotImplementedError: Passing StatLoggers to LLMEngine in V1 is not yet supported. Set VLLM_USE_V1=0 and file and issue on Github.
         try:
             self.run_engine()
         except KeyboardInterrupt:
@@ -197,27 +197,32 @@ class VllmWorker():
     def get_result(self, request_output):
         if request_output:
             input_length = len(request_output.prompt_token_ids)
-            num_generated_tokens = len(request_output.outputs[0].token_ids)
+            outputs = request_output.outputs[0]
+            num_generated_tokens = len(outputs.token_ids)
             max_model_len = self.llm_engine.get_model_config().max_model_len
             result = {
                 'num_generated_tokens': num_generated_tokens,
                 'max_seq_len': max_model_len,
                 'prompt_length': input_length,
-                'arrival_time': request_output.metrics.arrival_time,
+                #'arrival_time': request_output.metrics.arrival_time, # metrics currently not working, see https://github.com/vllm-project/vllm/issues/16348
                 'finished_time': time.time(),
                 'current_context_length': input_length + num_generated_tokens,
-                'pending_duration': request_output.metrics.time_in_queue,
+                #'pending_duration': request_output.metrics.time_in_queue,
                 'metrics': {
                     'in_num_tokens': input_length,
                     'out_num_tokens': num_generated_tokens, 
                 }
             }
-            if request_output.metrics.first_token_time and request_output.metrics.first_scheduled_time:
+            if request_output.metrics and request_output.metrics.first_token_time and request_output.metrics.first_scheduled_time:
                 result['preprocessing_duration'] = request_output.metrics.first_token_time - request_output.metrics.first_scheduled_time
-            if request_output.outputs[0].finish_reason == 'length' and not num_generated_tokens:
-                result['error'] = f"The context length {len(request_output.prompt_token_ids)} is exceeding the maximum context length {max_model_len}"
+            if outputs.finish_reason == 'length' and not num_generated_tokens:
+                result['error'] = f"The context length {input_length} is exceeding the maximum context length {max_model_len}"
             else:
-                result['text'] = request_output.outputs[0].text
+                previous_result = self.progress_update_data.get(request_output.request_id)
+                if previous_result and len(previous_result.get('text')) > 1 and len(outputs.token_ids) == 1:
+                    self.response_tokens_first_part[request_output.request_id] = previous_result.get('text')
+
+                result['text'] = self.response_tokens_first_part.get(request_output.request_id, []) + outputs.token_ids
             return result
 
     def update_progress(self):
@@ -242,9 +247,10 @@ class VllmWorker():
 
     def add_job_requests(self, job_batch_data):
         for job_data in job_batch_data:
+            self.logger.info(f'Job {job_data.get("job_id")} added')
             self.llm_engine.add_request(
                 job_data.get('job_id'), 
-                TokensPrompt(prompt_token_ids=job_data.get('chat_context') or job_data.get('prompt_input')),
+                TokensPrompt(prompt_token_ids=job_data.get('chat_context') or job_data.get('text_context')),
                 self.get_sampling_params(job_data)
             )
 
@@ -252,23 +258,23 @@ class VllmWorker():
         job_request_generator = self.api_worker.job_request_generator(self.args.max_batch_size)
         for job_batch_data in job_request_generator:
             self.add_job_requests(job_batch_data)
-            
-            for request_output in self.llm_engine.step():
-                result = self.get_result(request_output)
-                if request_output.finished:
-                    self.api_worker.send_job_results(
-                        result,
-                        job_id=request_output.request_id,
-                        wait_for_response=False,
-                        error_callback=self.error_callback
-                    )
-                    self.progress_update_data.pop(request_output.request_id, None)
-                else:
-                    self.progress_update_data[request_output.request_id] = result
-            self.update_progress()
-            for job_id in self.api_worker.get_canceled_job_ids():
-                self.logger.info(f'Job {job_id} canceled')
-                self.llm_engine.abort_request(job_id)
+            if self.llm_engine.has_unfinished_requests():
+                for request_output in self.llm_engine.step():
+                    result = self.get_result(request_output)
+                    if request_output.finished:
+                        self.api_worker.send_job_results(
+                            result,
+                            job_id=request_output.request_id,
+                            wait_for_response=False,
+                            error_callback=self.error_callback
+                        )
+                        self.progress_update_data.pop(request_output.request_id, None)
+                    else:
+                        self.progress_update_data[request_output.request_id] = result
+                self.update_progress()
+                for job_id in self.api_worker.get_canceled_job_ids():
+                    self.logger.info(f'Job {job_id} canceled')
+                    self.llm_engine.abort_request(job_id)
 
 
     def error_callback(self, response):
@@ -279,6 +285,10 @@ class VllmWorker():
     def exit_callback(self):
         destroy_model_parallel()
         destroy_distributed_environment()
+        try:
+            torch.distributed.destroy_process_group()
+        except AssertionError:
+            pass
         del self.llm_engine
         torch.cuda.empty_cache()
 
@@ -293,6 +303,10 @@ class VllmWorker():
             "--job-type", type=str, default=DEFAULT_WORKER_JOB_TYPE,
             help="Worker job type for the API Server"
         )
+        parser.add_argument(
+            "--queue-name", type=str,
+            help="Worker job type for the API Server"
+        )        
         parser.add_argument(
             "--model-label", type=str,
             help="Model label to display in client. Default: Name of the directory given in --model"
@@ -352,6 +366,8 @@ class VllmWorker():
         args.model_family = args.model_family or self.extract_family(args)
         if args.context_length:
             args.max_model_len = args.context_length
+        args.disable_async_output_proc = True # Fix for newer VLLM versions to go back to legacy behaviour with synchronous engine
+        # args.skip_tokenizer_init = True # If True, produces a warning in preprocessing in self.llm_engine.add_request() "Using None for EOS token id because tokenizer is not initialized"
         return args
 
 
